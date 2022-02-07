@@ -357,7 +357,7 @@ class CursorContextManager:
         return False
 
 
-def catch_invalidated_session(func: Callable) -> Callable:
+def retry_on_invalid_session(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(self: 'Cursor', *args: List[Any]) -> Any:
         exc_ = None
@@ -504,7 +504,20 @@ class Cursor:
                 else:
                     return res
 
-    @catch_invalidated_session
+    async def _refresh_session(self):
+        async with self._lock:
+            # TODO: Сначала проверить истечение сессии
+            await self._conn._db.loop.run_in_executor(
+                None, self._ora_cur.callproc, "DBMS_SESSION.RESET_PACKAGE", []
+            )
+
+    async def callfunc_refresh(self, name: str, return_type: Type, args: list) -> Any:
+        await self._refresh_session()
+        return await self.callfunc(name, return_type, args)
+
+    async def callfunc_retry(self, name: str, return_type: Type, args: list) -> Any:
+        return retry_on_invalid_session(await self.callfunc(name, return_type, args))
+
     async def callfunc(self, name: str, return_type: Type, args: list) -> Any:
         with wrap2span(
             name=OraSpan.NAME_CALLFUNC,
@@ -549,7 +562,13 @@ class Cursor:
 
                 return res
 
-    @catch_invalidated_session
+    async def callproc_refresh(self, name: str, args: list) -> list:
+        await self._refresh_session()
+        return await self.callproc(name, args)
+
+    async def callproc_retry(self, name: str, args: list) -> list:
+        return retry_on_invalid_session(await self.callproc(name, args))
+
     async def callproc(self, name: str, args: list) -> list:
         with wrap2span(
             name=OraSpan.NAME_CALLFUNC,
